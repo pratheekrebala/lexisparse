@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # Some functions that will help with parsing lexisnexis results
+from __future__ import division
 import sys
 import getopt
 import re
@@ -7,6 +8,9 @@ import glob
 import argparse
 import csv
 import os.path
+from collections import defaultdict
+
+document_boundary = "\d+ of \d+ DOCUMENTS.{0,1}"
 
 def getcolumns(fullstr,percent=10):
     """
@@ -17,17 +21,23 @@ def getcolumns(fullstr,percent=10):
     percent -- The minimum percentage of occurences needed to include a column.
                (default: 10)
     """
-    cols = re.findall("\n([A-Z\-]+): .+",fullstr)
-    d = dict()
-    for c in cols:
-        if c in d:
-            d[c] += 1
-        else:
-            d[c] = 1
+    allsplits = re.split(document_boundary,fullstr)
+    all_cols = defaultdict(lambda: dict({'document_total':0,'total_occurances':0}))
+    for i,s in enumerate(allsplits[1:]):
+        cols = re.findall("\n([A-Z\-]+): .+",s)
+        d = dict()
+        for c in cols:
+            if c in d:
+                d[c] += 1
+            else:
+                d[c] = 1
+        for c in d:
+            all_cols[c]['document_total'] += 1
+            all_cols[c]['total_occurances'] += d[c]
+            all_cols[c]['term_average'] = float(all_cols[c]['document_total']/all_cols[c]['total_occurances'])
+    return [c for c in all_cols.keys() if all_cols[c]['term_average'] ==1 and (all_cols[c]['total_occurances']/len(allsplits))*100 > float(percent)]
 
-    return [c for c in d.keys() if d[c]>(max(d.values())*percent/100.0)]
-
-def splitdocs(fullstr,topmarker="LENGTH",bottommarker="LOAD-DATE",colnames=["LENGTH"],dodate=False):
+def splitdocs(fullstr,topmarker=["LENGTH","DATELINE"],bottommarker=["LOAD-DATE"],colnames=["LENGTH"],dodate=False,docopyright=False):
     """
     Return a list of dictionaries containing articles and metadata.
 
@@ -39,14 +49,12 @@ def splitdocs(fullstr,topmarker="LENGTH",bottommarker="LOAD-DATE",colnames=["LEN
     bottommarker -- The first piece of metadata after an article (default: "LOAD-DATE")
     colnames -- The list of metadata names in a list (default: ["LENGTH"])
     """
-
     if colnames is None or len(colnames)==0:
         colnames = ["LENGTH"]
     # process the column names for the copyright line
     if colnames is not None and len(colnames)>0:
         oldcolnames = colnames
         colnames = []
-        docopyright = False
         for c in oldcolnames:
             if c.upper() != 'COPYRIGHT':
                 colnames.append(c)
@@ -54,30 +62,40 @@ def splitdocs(fullstr,topmarker="LENGTH",bottommarker="LOAD-DATE",colnames=["LEN
                 # copyright is handled differently, but people can enter it the same way
                 docopyright = True
 
-    allsplits = re.split("\d+ of \d+ DOCUMENTS.{0,1}",fullstr)
+    allsplits = re.split(document_boundary,fullstr)
     articles = []
     for i,s in enumerate(allsplits[1:]):
         #import code; code.interact(local=locals())
-        if topmarker is not None and re.search("\n"+topmarker+".+?\n",s) is not None:
-            headersplit = re.split("\n"+topmarker+".+?\n",s)
+        topmarkerstr = str("|".join(str(x) for x in topmarker))
+        if topmarker is not None and re.search("\n("+ topmarkerstr +").+?\n",s) is not None:
+            headermarker = re.findall("\n("+topmarkerstr+").+?\n",s)[-1]
+            headersplit = re.split("\n"+headermarker+".+?\n",s)
             header = headersplit[0]
+            header_props = re.split('\n\s*\n', header.strip())
             body = headersplit[1]
         else:
             header = ''
             body = s
+            header_props = []
             if topmarker is not None:
-                print "*** Marker", topmarker, "not found in article", i+1
-        if bottommarker is not None and re.search("\n"+bottommarker+".+?\n",body) is not None:
-            bottomsplit = re.split("\n"+bottommarker+".+?\n",body)
+                print "*** Marker", topmarkerstr, "not found in article", i+1
+        bottommarkerstr = str("|".join(bottommarker))
+        if bottommarker is not None and re.search("\n("+bottommarkerstr+").+?\n",body) is not None:
+            footermarker = re.findall("\n("+bottommarkerstr+").+?\n",s)[-1]
+            bottomsplit = re.split("\n"+footermarker+".+?\n",body)
             body = bottomsplit[0]
             footer = bottomsplit[1]
         else:
             footer = ''
             body = body
             if bottommarker is not None:
-                print "*** Marker", bottommarker, "not found in article", i+1
+                print "*** Marker", bottommarkerstr, "not found in article", i+1
 
         d = dict.fromkeys(colnames)
+        if header_props is not None and len(header_props) > 1:
+            d['sug_publication'] = header_props[0]
+            d['sug_pub_date'] = header_props[1]
+            d['sug_title'] = header_props[2]
         if dodate:
             d['Date'] = None
         d['text'] = body.strip()
@@ -184,7 +202,6 @@ def main():
 
     if fcsv:
         fcsv.close()
-
 
 if __name__ == '__main__':
     main()
