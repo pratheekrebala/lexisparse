@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Some functions that will help with parsing lexisnexis results
-from __future__ import division
+
 import sys
 import getopt
 import re
@@ -9,8 +9,10 @@ import argparse
 import csv
 import os.path
 from collections import defaultdict
+import logging
+from urllib.parse import urlparse
 
-document_boundary = "\d+ of \d+ DOCUMENTS.{0,1}"
+document_boundary = "\d+ of \d+ DOCUMENTS?.{0,1}"
 
 def getcolumns(fullstr,percent=10):
     """
@@ -35,9 +37,9 @@ def getcolumns(fullstr,percent=10):
             all_cols[c]['document_total'] += 1
             all_cols[c]['total_occurances'] += d[c]
             all_cols[c]['term_average'] = float(all_cols[c]['document_total']/all_cols[c]['total_occurances'])
-    return [c for c in all_cols.keys() if all_cols[c]['term_average'] ==1 and (all_cols[c]['total_occurances']/len(allsplits))*100 > float(percent)]
+    return [c for c in list(all_cols.keys()) if all_cols[c]['term_average'] ==1 and (all_cols[c]['total_occurances']/len(allsplits))*100 > float(percent)]
 
-def splitdocs(fullstr,topmarker=["LENGTH","DATELINE"],bottommarker=["LOAD-DATE"],colnames=["LENGTH"],dodate=False,docopyright=False):
+def splitdocs(fullstr,topmarker=["TEXT", "LENGTH","DATELINE", "[0-9]+\sword"],bottommarker=["LOAD-DATE"],colnames=["LENGTH"],dodate=False,docopyright=False):
     """
     Return a list of dictionaries containing articles and metadata.
 
@@ -67,9 +69,14 @@ def splitdocs(fullstr,topmarker=["LENGTH","DATELINE"],bottommarker=["LOAD-DATE"]
     for i,s in enumerate(allsplits[1:]):
         #import code; code.interact(local=locals())
         topmarkerstr = str("|".join(str(x) for x in topmarker))
+        header = s
         if topmarker is not None and re.search("\n("+ topmarkerstr +").+?\n",s) is not None:
             headermarker = re.findall("\n("+topmarkerstr+").+?\n",s)[-1]
             headersplit = re.split("\n"+headermarker+".+?\n",s)
+        else:
+            headersplit = re.split(r'(?:.{0,10}? \d{1,2}, \d{4}(?: .[A-z]+?day)?)(?: \d{1,2}:\d{2} ?AM|PM)?(?: [A-Z]{1,3})?', s, 1)
+
+        if len(headersplit) > 1:
             header = headersplit[0]
             header_props = re.split('\n\s*\n', header.strip())
             body = headersplit[1]
@@ -78,7 +85,8 @@ def splitdocs(fullstr,topmarker=["LENGTH","DATELINE"],bottommarker=["LOAD-DATE"]
             body = s
             header_props = []
             if topmarker is not None:
-                print "*** Marker", topmarkerstr, "not found in article", i+1
+                logging.info("*** Marker %s not found in article %s ***" % (topmarkerstr, i + 1))
+
         bottommarkerstr = str("|".join(bottommarker))
         if bottommarker is not None and re.search("\n("+bottommarkerstr+").+?\n",body) is not None:
             footermarker = re.findall("\n("+bottommarkerstr+").+?\n",s)[-1]
@@ -89,13 +97,23 @@ def splitdocs(fullstr,topmarker=["LENGTH","DATELINE"],bottommarker=["LOAD-DATE"]
             footer = ''
             body = body
             if bottommarker is not None:
-                print "*** Marker", bottommarkerstr, "not found in article", i+1
+                logging.debug("*** Marker %s not found in article %s ***" % (bottommarkerstr, i+1))
 
         d = dict.fromkeys(colnames)
-        if header_props is not None and len(header_props) > 1:
-            d['sug_publication'] = header_props[0]
-            d['sug_pub_date'] = header_props[1]
-            d['sug_title'] = header_props[2]
+        d['header'] = header
+        num_headers = len(header_props)
+        if header_props is not None and num_headers > 0:
+            if num_headers > 1:
+                d['sug_publication'] = header_props[0]
+                if num_headers > 2:
+                    if header_props[2].startswith('http') and header_props[0] == 'View Full Results Online':
+                        d['sug_pub_date'] = header_props[3]
+                        d['sug_title'] = header_props[4]
+                    else:
+                        d['sug_pub_date'] = header_props[1]
+                        d['sug_title'] = header_props[2]
+                else: d['sug_title'] = header_props
+            else: d['sug_title'] = header_props[0]
         if dodate:
             d['Date'] = None
         d['text'] = body.strip()
@@ -108,7 +126,7 @@ def splitdocs(fullstr,topmarker=["LENGTH","DATELINE"],bottommarker=["LOAD-DATE"]
                 copyresult = re.findall(r'\n\s+(Copyright|\N{COPYRIGHT SIGN}|©)\s+(.*)\n',s,flags=re.IGNORECASE)
                 d['COPYRIGHT'] = copyresult[0][1].strip()
             except:
-                print "*** Copyright line not found in article", i+1
+                print("*** Copyright line not found in article", i+1)
         if dodate:
             try:
                 dateresult = re.findall(r'\n\s{5}.*\d+.*\d{4}\s',s,flags=re.IGNORECASE)
@@ -117,9 +135,20 @@ def splitdocs(fullstr,topmarker=["LENGTH","DATELINE"],bottommarker=["LOAD-DATE"]
                     dateresult += re.findall(r'\w+\s*\d{4}', header)
                 d['Date'] = dateresult[0].strip()
             except:
-                print "*** Date line not found in article", i+1
+                print("*** Date line not found in article", i+1)
+
         articles.append(d)
     return articles
+
+def islink(link):
+    parseResult = urlparse(link)
+    if parseResult.scheme in ['http','https']:
+        #its a valid url
+        print(link)
+
+
+
+
 
 def main():
     parser = argparse.ArgumentParser(description='Parse output from Lexis Nexis.')
@@ -146,7 +175,7 @@ def main():
         fieldnames += args['metadata']
     if args['date']:
         fieldnames += ['Date']
-        print fieldnames
+        print(fieldnames)
     if args["csvfile"] is not None:
         fcsv = open(args["csvfile"][0],'w')
         dw = csv.DictWriter(fcsv, delimiter='\t', fieldnames=fieldnames)
@@ -174,14 +203,15 @@ def main():
 
     counter = 0
     for f in files:
-        fp = open(f,'rU')
-        print "Processing file: ", f
+        fp = open(f,'r', encoding='latin-1')
+        print("Processing file: ", f)
         #splitdocs(fullstr,topmarker="LENGTH",bottommarker="LOAD-DATE",colnames=["LENGTH"]):
         if args['boundaries'] is not None:
             outputs = splitdocs(fp.read(),topmarker=bstart,bottommarker=bend,colnames=args['metadata'],dodate=args['date'])
         else:
+            print(fp.read())
             outputs = splitdocs(fp.read(),colnames=args['metadata'],dodate=args['date'])
-        print "...............{} articles found".format(len(outputs))
+        print("...............{} articles found".format(len(outputs)))
         if args["outfiles"] is not None:
             for art in outputs:
                 #import code; code.interact(local=locals())
